@@ -2,27 +2,29 @@ package server;
 
 import java.io.*;
 import java.net.*;
-import java.util.Properties;
+import java.util.*;
 
 public class Slave {
     private String ip;
     private int port;
     private String localRoot;
     private int masterPort;
+    String configFile = "../conf/slave.conf";
 
-    public Slave(String configFile) {
-        loadConfig(configFile);
+    public Slave(int  index) {
+        loadConfig(index);
     }
 
-    public void loadConfig(String configFile) {
+    public void loadConfig(int index) {
         try {
             Properties prop = new Properties();
             FileInputStream input = new FileInputStream(configFile);
+
             prop.load(input);
 
-            ip = prop.getProperty("slave_ip");
-            port = Integer.parseInt(prop.getProperty("slave_port"));
-            localRoot = prop.getProperty("local_root");
+            ip = prop.getProperty("slave" + index + ".ip");
+            port = Integer.parseInt(prop.getProperty("slave" + index + ".port"));
+            localRoot = prop.getProperty("slave" + index + ".local_root");
             masterPort = Integer.parseInt(prop.getProperty("master_port"));
 
         } catch (IOException e) {
@@ -38,7 +40,7 @@ public class Slave {
             String message = "REGISTER:" + ip + ":" + port + ":" + localRoot + ":" + masterPort;
             byte[] buffer = message.getBytes();
 
-            InetAddress masterAddress = InetAddress.getByName("255.255.255.255"); // Broadcast address
+            InetAddress masterAddress = InetAddress.getByName("255.255.255.255"); 
             DatagramPacket packet = new DatagramPacket(buffer, buffer.length, masterAddress, masterPort);
 
             socket.send(packet);
@@ -67,18 +69,40 @@ public class Slave {
              DataOutputStream out = new DataOutputStream(masterSocket.getOutputStream())) {
 
             String command = in.readUTF();
-            if (command.startsWith("partition ")) {
+            if (command.startsWith("replied_partition ")) {
                 String[] parts = command.split(" ", 4);
                 String fileName = parts[1];
                 int partitionIndex = Integer.parseInt(parts[2]);
                 String fileContent = parts[3];
 
-                // Store the partition locally
                 storePartition(fileName, partitionIndex, fileContent);
 
-                // Send acknowledgment to the master
-                out.writeUTF("ACK:" + ip + ":" + port + ":" + fileName + ":" + partitionIndex);
                 System.out.println("Partition stored and ACK sent to master.");
+
+            } if (command.startsWith("partition ")) {
+                String[] parts = command.split(" ", 5);
+                String fileName = parts[1];
+                int partitionIndex = Integer.parseInt(parts[2]);
+                String replicationList = parts[3];
+                String fileContent = parts[4];
+
+                storePartition(fileName, partitionIndex, fileContent);
+                out.writeUTF("ACK:" + ip + ":" + port + ":" + fileName + ":" + partitionIndex);
+
+                if(!replicationList.equals(",")) {
+                    String[] slaves = replicationList.split(",");
+                    Random rand = new Random();
+                    int index = rand.nextInt(slaves.length);
+                    String[] info = slaves[index].split(":");
+                    String ip = info[0]; 
+                    int port = Integer.parseInt(info[1]);
+                    String message = "replied_partition " + fileName + " " + partitionIndex + " " + fileContent;
+                    sendMessage(ip, port, message);
+                    out.writeUTF("REPLICATED_ACK:" + ip + ":" + port + ":" + fileName + ":" + partitionIndex);
+                }
+
+                System.out.println("Partition stored, replicate and ACK sent to master.");
+
             } else if (command.startsWith("get_partition ")) {
                 String[] parts = command.split(" ", 3);
                 String fileName = parts[1];
@@ -93,8 +117,18 @@ public class Slave {
             } else if (command.startsWith("delete_partition ")) {
                 String fileName = command.substring(17);
                 deletePartition(fileName);
-                out.writeUTF("ACK"); // Ensure ACK is sent
+                out.writeUTF("ACK"); 
             }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void sendMessage(String ip, int port, String message) {
+        try (Socket socket = new Socket(ip, port);
+             DataInputStream in = new DataInputStream(socket.getInputStream());
+             DataOutputStream out = new DataOutputStream(socket.getOutputStream())) {
+                out.writeUTF(message);
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -114,7 +148,7 @@ public class Slave {
                     data.append(line).append("\n");
                 }
             }
-            return data.toString().trim();
+            return data.toString();
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -155,14 +189,14 @@ public class Slave {
 
     public static void main(String[] args) {
         new Thread(() -> {
-            Slave slave = new Slave("../conf/slave1.conf");
+            Slave slave = new Slave(1);
             if (slave != null) {
                 slave.sendRegisterMessage();
                 slave.listenForMasterCommands();
             }
         }).start();
         new Thread(() -> {
-            Slave slave = new Slave("../conf/slave2.conf");
+            Slave slave = new Slave(2);
             if (slave != null) {
                 slave.sendRegisterMessage();
                 slave.listenForMasterCommands();

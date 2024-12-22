@@ -36,8 +36,9 @@ public class Master {
             byte[] buffer = new byte[1024];
 
             System.out.println("Master listening for REGISTER messages on port " + port);
-
+            Scanner scanner = new Scanner();
             while (true) {
+                if(scanner.nextLine())
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                 socket.receive(packet);
 
@@ -53,12 +54,26 @@ public class Master {
         }
     }
 
+    int getPartition() {
+        int max = 0;
+        for(String key : filePartitionMap.keySet()) {
+            for(String map : filePartitionMap.get(key)) {
+                String[] values = map.split(",");
+                int value = Integer.parseInt(values[0]);
+                if(max < value) {
+                    max = value;
+                }
+            }
+        }
+        return max + 1;
+    }
+
     void handleGetRequest(String fileName, DataOutputStream clientOut) throws IOException {
         if (!filePartitionMap.containsKey(fileName)) {
             clientOut.writeUTF("ERROR: File not found on master.");
             return;
         }
-    
+     
         List<String> partitions = filePartitionMap.get(fileName);
         Map<Integer, String> reassembledFile = new TreeMap<>();
     
@@ -73,11 +88,16 @@ public class Master {
                 reassembledFile.put(partitionIndex, partitionData);
             }
         }
-    
+        
         // Reassemble the file content
         StringBuilder fileContent = new StringBuilder();
-        for (String partition : reassembledFile.values()) {
-            fileContent.append(partition).append("\n");
+        int partition = getPartition();
+        for (int i = 0; i < partition; i++) {
+            if(reassembledFile.get(i) == null) {
+                clientOut.writeUTF("Failed to reassemble file: Unreachable slave");
+                return;
+            }
+            fileContent.append(reassembledFile.get(i)).append("\n");
         }
     
         clientOut.writeUTF("SUCCESS");
@@ -97,7 +117,7 @@ public class Master {
                 return response.substring(14); 
             }
         } catch (IOException e) {
-            e.printStackTrace();
+            System.out.println("Unreachable slave: " + slaveIp + ":" + slavePort + ". Failed to load partition");
         }
         return null;
     }
@@ -120,12 +140,14 @@ public class Master {
                 DataOutputStream out = new DataOutputStream(clientSocket.getOutputStream())) {
 
             String command = in.readUTF();
-            if (command.startsWith("upload ")) {
+            if (command.startsWith("put ")) {
                 String filePath = command.substring(7);
                 System.out.println("Received upload request for file: " + filePath);
                 partitionAndDistributeFile(filePath, in);
             } else if (command.equals("ls")) {
                 sendFilePartitionList(out);
+            } else if (command.equals("connect")) {
+                System.out.println("Client registered.");
             } else if (command.startsWith("get ")) {
                 String[] parts = command.split(" ", 3);
                 String fileName = parts[1];
@@ -153,7 +175,7 @@ public class Master {
             List<String> partitions = entry.getValue();
     
             StringBuilder partitionInfo = new StringBuilder();
-            partitionInfo.append("- " + fileName).append(": ").append(partitions.size()).append(" partitions\n");
+            partitionInfo.append("- " + fileName).append(": ").append(getPartition()).append(" partitions\n");
             
             for (String partition : partitions) {
                 String[] parts = partition.split(",");
@@ -169,15 +191,50 @@ public class Master {
         try (Socket slaveSocket = new Socket(slaveIp, slavePort);
                 DataOutputStream out = new DataOutputStream(slaveSocket.getOutputStream());
                 DataInputStream in = new DataInputStream(slaveSocket.getInputStream())) {
+            if (slaves.isEmpty()) {
+                System.out.println("No active slaves to distribute the file.");
+                return;
+            }
 
-            out.writeUTF("partition " + filePath + " " + index + " " + line);
+            String replicationList = "";
+
+            for(int i = 0; i < slaves.size(); i++) {
+                String[] slaveDetails = slaves.get(i).split(":");
+                String slaveip = slaveDetails[0];
+                int slaveport = Integer.parseInt(slaveDetails[1]);
+                if(!slaveip.equals(slaveIp) || slaveport != slavePort) {
+                    replicationList += slaveip + ":" + slaveport; 
+                    if(i < slaves.size() && slaves.size() > 2)
+                        replicationList += ",";
+                }
+            }
+            if(replicationList.isEmpty()) replicationList = ",";
+            
+            out.writeUTF("partition " + filePath + " " + index + " " + replicationList + " "+ line);
             String slaveResponse = in.readUTF();
-            System.out.println("Slave response: " + slaveResponse);
-
-            filePartitionMap.computeIfAbsent(filePath, k -> new ArrayList<>())
-                    .add(index + "," + slaveIp + "," + slavePort);
-
+            if(!filePartitionMap.containsKey(filePath)) {
+                filePartitionMap.put(filePath, new ArrayList<>());
+            }
+            filePartitionMap.get(filePath).add(index + "," +slaveIp + "," + slavePort);
             savePersistence();
+            System.out.println(slaveResponse);
+           
+            if(!replicationList.equals(",")) {
+                slaveResponse = in.readUTF();
+                if (slaveResponse.startsWith("REPLICATED_ACK"))  {
+                    String[] response = slaveResponse.split(":");
+                    slaveIp = response[1];
+                    slavePort = Integer.parseInt(response[2]);
+                    index = Integer.parseInt(response[4]);
+
+                    if(!filePartitionMap.containsKey(filePath)) {
+                        filePartitionMap.put(filePath, new ArrayList<>());
+                    }
+                    filePartitionMap.get(filePath).add(index + "," +slaveIp + "," + slavePort);
+                    savePersistence();
+                    System.out.println(slaveResponse);
+                }
+            }
 
         } catch (IOException e) {
             e.printStackTrace();
@@ -193,10 +250,10 @@ public class Master {
                 String partitionData = parts[1].trim();
 
                 List<String> partitions = new ArrayList<>();
-                partitionData = partitionData.substring(1, partitionData.length() - 1); // Remove curly braces
-                String[] partitionEntries = partitionData.split("],\\[");
+                partitionData = partitionData.substring(1, partitionData.length() - 1);
+                String[] partitionEntries = partitionData.split("], \\[");
                 for (String entry : partitionEntries) {
-                    partitions.add(entry.replace("[", "").replace("]", ""));
+                    partitions.add(entry.replaceAll("\\[", "").replaceAll("]", ""));
                 }
 
                 filePartitionMap.put(fileName, partitions);
@@ -210,9 +267,16 @@ public class Master {
 
     void savePersistence() {
         try (BufferedWriter writer = new BufferedWriter(new FileWriter("../register/master_data.dat"))) {
-            for (Map.Entry<String, List<String>> entry : filePartitionMap.entrySet()) {
-                writer.write(entry.getKey() + "={");
-                writer.write(String.join(", ", entry.getValue()));
+            for (String key : filePartitionMap.keySet()) {
+                List<String> entry = filePartitionMap.get(key);
+                writer.write(key + "={");
+                int length = entry.size();
+                for(int i = 0; i < length; i++) {
+                    writer.write("[" + entry.get(i) + "]");
+                    if(i < length - 1) {
+                        writer.write(", ");
+                    }
+                }
                 writer.write("}");
                 writer.newLine();
             }
@@ -257,9 +321,6 @@ public class Master {
 
             partitions.add("[" + i + "," + slaveIp + "," + slavePort + "]");
         }
-
-        filePartitionMap.put(fileName, partitions);
-        savePersistence();
     }
 
     private void handleRmRequest(String fileName, DataOutputStream clientOut) throws IOException {
@@ -273,7 +334,7 @@ public class Master {
         for (String partitionInfo : partitions) {
             String[] details = partitionInfo.split(",");
             String slaveIp = details[1].trim();
-            int slavePort = Integer.parseInt(details[2].replaceAll("[|]", "").trim());
+            int slavePort = Integer.parseInt(details[2].replaceAll("\\[|\\]", "").trim());
     
             sendDeleteCommandToSlave(slaveIp, slavePort, fileName);
         }
@@ -285,9 +346,11 @@ public class Master {
     }
     
     private void sendDeleteCommandToSlave(String slaveIp, int slavePort, String fileName) {
-        try (Socket slaveSocket = new Socket(slaveIp, slavePort);
-             DataOutputStream out = new DataOutputStream(slaveSocket.getOutputStream());
-             DataInputStream in = new DataInputStream(slaveSocket.getInputStream())) {
+        DataOutputStream out = null;
+        try {
+            Socket slaveSocket = new Socket(slaveIp, slavePort);
+            out = new DataOutputStream(slaveSocket.getOutputStream());
+            DataInputStream in = new DataInputStream(slaveSocket.getInputStream());
     
             out.writeUTF("delete_partition " + fileName);
             String response = in.readUTF();
@@ -298,7 +361,9 @@ public class Master {
             }
     
         } catch (IOException e) {
-            e.printStackTrace();
+            try {
+                out.writeUTF("Unreachable slave: " + slaveIp + ":" + slavePort + ". Failed to remove partition"); 
+            } catch(IOException e1) {}
         }
     }
 

@@ -9,9 +9,16 @@ public class Client {
     private int portMaster;
 
     public void connect(String ip, int port) {
-        this.ipMaster = ip;
-        this.portMaster = port;
-        System.out.println("Connected to master at " + ip + ":" + port);
+        try (Socket socket = new Socket(ip, port);
+             DataInputStream in = new DataInputStream(socket.getInputStream());
+             DataOutputStream out = new DataOutputStream(socket.getOutputStream())) {
+                out.writeUTF("connect");
+                this.ipMaster = ip;
+                this.portMaster = port;
+                System.out.println("Connected to master at " + ip + ":" + port);
+        } catch (IOException e) {
+            System.out.println("No path to the server.");
+        }
     }
 
     public void ls() {
@@ -81,7 +88,7 @@ public class Client {
              DataOutputStream out = new DataOutputStream(socket.getOutputStream());
              BufferedReader fileReader = new BufferedReader(new FileReader(filePath))) {
 
-            out.writeUTF("upload " + filePath);
+            out.writeUTF("put " + filePath);
             System.out.println("Sent upload request for file: " + filePath);
 
             String line;
@@ -118,11 +125,20 @@ public class Client {
         }
     }
 
+    static void displayHelp() {
+        System.out.println("List of command:");
+        System.out.println("    -ls: List the master registered files");
+        System.out.println("    -rm <file>: delete a registered file and its partitions");
+        System.out.println("    -put <file>: store and partition loacal file to slave");
+        System.out.println("    -get <file> <destination>: recover a partitionned file");
+        System.out.println("    -connect <ip>:<port>: connect to a master server");
+    }
+
     public static void main(String[] args) {
         Client client = new Client();
         Scanner scanner = new Scanner(System.in);
 
-        System.out.println("Client CLI. Use commands: connect <ip>:<port>, upload <filepath>");
+        System.out.println("Client CLI. Use help to show command.");
 
         while (true) {
             System.out.print("> ");
@@ -132,8 +148,10 @@ public class Client {
             if (parts[0].equals("connect") && parts.length == 2) {
                 String[] address = parts[1].split(":");
                 client.connect(address[0], Integer.parseInt(address[1]));
-            } else if (parts[0].equals("upload") && parts.length == 2) {
+            } else if (parts[0].equals("put") && parts.length == 2) {
                 client.upload(parts[1]);
+            } else if (parts[0].equals("help")) {
+                displayHelp();
             } else if (parts[0].equals("ls")) {
                 client.ls();
             } else if (parts[0].equals("exit")) {
